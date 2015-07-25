@@ -1,0 +1,132 @@
+A Predictive Model for Weight Lifting Biomechanics
+==================================================================
+###Aaron McAdie
+###Practical Machine Learning
+###Johns Hopkins Data Science Specialization
+
+This analysis aims to classify correct and incorrect biomechanics during a weightlifting exercise.  The source data was collected and made available by Eduardo Velloso et. al. The team of researchers attached an array of accelerometers to specified body locations of a set of study participants.  The participants were instructed to perform a dumbbell curl correctly (Class A), and incorrectly in 4 specific ways (Class B - throwing elbows to the front, Class C - lifting the dumbbel only halfway, Class D - .  lowering the dumbbel only halfway, and Class E - throwing the hips foreward).  The research team collected data from the motion sensors during each class of the exercise.  They were able to build a classification model that was able to accurately determine whether the curl was done correctly, or incorrectly in a specific way.  They also kindly made their data public for others to work with.  More information about the study can be found [here](http://groupware.les.inf.puc-rio.br/har).
+
+Let's start the analysis by loading the data, which is already split into training and test sets.
+
+```{r loading, warning = FALSE}
+library(caret)
+```
+
+```{r, cache = TRUE}
+training <- read.csv("pml-training.csv")
+testing <- read.csv("pml-testing.csv")
+str(training)
+```
+
+The training data set consists of nearly 20,000 observations of 160 variables.  From summary we can see that the column classes need a little work.  Many of columns containing numeric data are not classified as such.  Getting the column classes in order is the first step in preparing for analysis.
+
+```{r cache = TRUE, warning = FALSE}
+#set correct column classes
+for(i in 10:159) training[,i] <- as.numeric(as.character(training[,i]))
+```
+
+With that corrected, let's start narrowing down the 160 potential predictors to the ones that are most pertinent to the classification problem.  A good first step is removing columns that have have very little variance, and thus are not good predictors.  This is done with the nearZeroVar function.  It is also apparent from the str summary above that several of the columns contain NA values.  Let's also drop columns that contain more than 30% NAs, as those are also less than ideal predictors.
+
+```{r data processing, cache = TRUE}
+#drop columns with near zero variance
+zero_var_index <- nearZeroVar(training)
+train_var <- training[,-zero_var_index]
+dim(train_var)
+names(train_var)
+
+#drop columns with >30% NA values
+percent_NA <- function(x) sum(is.na(x))/length(x)
+train_NA <- sapply(train_var[,1:124], percent_NA)
+train_NA_index <- train_NA<0.3
+train_lessNA <- train_var[,train_NA_index]
+dim(train_lessNA)
+
+```
+
+Those two conditions have dropped the list of potential predictors to 58, which is a little more manageable.  It would be good if the model did not consider the effect of the individual participants, since it could be more easily generalized.  The data from the motion sensors, in columns 7-58, seem the most pertinent.  Let's create a feature plot of those predictors vs the activity class to see if any clear patterns are present.
+
+```{r EDA, cache = TRUE}
+#plot predictors against response
+featurePlot(x = train_lessNA[,7:58], y = train_lessNA[,59], plot = "strip", jitter = TRUE)
+```
+
+While there aren't any obvious relationships from the feature plot, it is clear that there is one outlier in one of the dumbbell sensor columns.  Let's set that value to NA, and then set all the other remaining NA values to the respective column means.  It is not clear to me that various machine learning algorithms are able to handle NAs, so it seems reasonable to interpolate missing data upfront.
+
+```{r EDA2, cache = TRUE}
+min(train_lessNA[,7:58])
+index <- train_lessNA == -3600
+train_lessNA[index] <- NA
+
+#set remaining NA values to respective column medians
+colmedians <- sapply(train_lessNA[,7:58], median)
+for(i in 7:58){
+    index2 <- is.na(train_lessNA[,i])
+    train_lessNA[index2, i] <- colmedians[i]
+}
+
+#feature plot with outlier removed
+featurePlot(x = train_lessNA[,7:58], y = train_lessNA[,59], plot = "strip", jitter = TRUE)
+```
+
+The second set of feature plots is a little more clear with the outlier removed.  Some variables seem to take slightly different distributions based on the activity classification, but again it is not too obvious.  Let's take a random subset of the training data and begin creating some models to hone in on the important relationships.
+
+```{r final train and subset, cache = TRUE}
+#declare final processed training set
+train_final <- train_lessNA
+rm(train_lessNA)
+
+train_sub <- train_final[sample(1:nrow(train_final), size = 5000, replace = FALSE),]
+```
+
+Priciple component analysis is a good strategy to narrow down the dimensionality of the data, and possibly explain most of the variance by combining the predictors into a few principle compnents.  Let's create a set of PCAs for the subset of the training data, using 80% variance retained as a threshold, and then use those PCAs as predictors in a basic partition model.
+
+```{r partition with PCA, cache = TRUE}
+#PCA
+preproc <- preProcess(train_sub[,7:58], method = "pca", thresh = 0.8)
+trainPCA <- predict(preproc, train_sub[,7:58])
+
+#try partition model with PCAs as features
+fit <- train(train_sub$classe ~ ., method = "rpart", data = trainPCA)
+confusionMatrix(train_sub$classe, predict(fit))
+```
+
+Unfortunately this first pass was not particularly successful.  The confusion matrix above shows the in-sample model performance.  The overall accuracy was quite poor at only 37% accurate.  Interestingly, this model was decent at correctly assigning cases of Class E, where the hips were thrown forward.  The sensitivity and specificity for Case E were both 83%.  At any rate, the PCA/partition model can definitely be improved upon.  Let's open it up to the full set of predictors to see if that allows a better partition model.
+
+
+```{r partition with all predictors, cache = TRUE}
+#well that didn't work out so well let's just try all the predictors
+fit2 <- train(train_sub$classe ~ ., method = "rpart", data = train_sub[,7:58])
+confusionMatrix(train_final$classe, predict(fit2, newdata = train_final))
+```
+
+Since there are no PCAs calculated in this model, it is straightforward to use the model built on the subset of the training set to predict on the full training set.  This pseudo test set gives some idea of what the out of sample error would be, although the training subset was drawn from the full training set.  The confusion matrix above shows the model performance on the full training set.  While there is an improvement over the PCA model, 50% accuracy of classification is still nothing to write home about.  Again, in spite of the overall poor accuracy, the partition model does a good job of correctly identifying Class E.
+
+Let's try a more sophisticated approach, a random forest model, to see if we can improve the classification accuracy.
+
+```{r random forest, cache = TRUE}
+fit4 <- train(train_sub$classe ~ .,method = "rf", data = train_sub[,7:58])
+confusionMatrix(train_final$classe, predict(fit4, newdata = train_final))
+```
+
+Thankfully all that computation time has made a big difference.  The random forest model trained on the 5000 row subset was able to predict class in the larger training set with 98% accuracy.  The sensitivity and specificity within each class are also quite high.  This certainly looks like a promising approach.  Let's now train the random forest model with the entire training data set.
+
+```{r random forest whole, cache = TRUE}
+fit5 <- train(train_final$classe ~ .,method = "rf", data = train_final[,7:58])
+fit5
+```
+
+Training the random forest model on the whole final training set resulted in a fit that acheived quite high accuracy on the bootstrap resamples.  The optimal model used only two variable choices at each node, but the accuracy was pretty stable across a range of mtry settings.  Below is a list of the important features, sorted from highest to lowest.
+
+```{r}
+varImp(fit5)
+```
+
+The belt and dumbbell sensors appear to be the most important for classification.  Data from those two sensors make up the top 5 most important features overall.  Below is a summary of the final model.  The performance appears excellent, with an out of bag error rate of only 0.42%.  Let's hope it performs this well on the test set.
+
+```{r}
+fit5$finalModel
+```
+
+
+
+
